@@ -54,6 +54,16 @@ function signToken(user) {
   return jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 }
 
+function publicSession(s) {
+  return {
+    id: s.id,
+    account_name: s.account_name,
+    qr_code: s.qr_code,
+    is_authenticated: s.is_authenticated,
+    created_at: s.created_at,
+  };
+}
+
 function jsonError(res, status, message) {
   return res.status(status).json({ error: message });
 }
@@ -196,14 +206,14 @@ app.post('/whatsapp/link', requireAuth, async (req, res, next) => {
       const session = existing[0];
       const entry = clients.get(userId);
       if (entry && entry.client.info && entry.client.info.wid) {
-        return res.json({ session: { ...session, is_authenticated: true } });
+        return res.json({ session: { ...publicSession(session), is_authenticated: true } });
       }
       if (session.is_authenticated) {
         await startClient(userId, session);
-        return res.json({ session });
+        return res.json({ session: publicSession(session) });
       }
       await startClient(userId, session);
-      return res.json({ session });
+      return res.json({ session: publicSession(session) });
     }
 
     const { data: session, error } = await supabase
@@ -214,7 +224,7 @@ app.post('/whatsapp/link', requireAuth, async (req, res, next) => {
     if (error) return jsonError(res, 500, 'Failed to create session');
 
     await startClient(userId, session);
-    res.status(201).json({ session });
+    res.status(201).json({ session: publicSession(session) });
   } catch (err) {
     next(err);
   }
@@ -224,11 +234,11 @@ app.get('/whatsapp/status', requireAuth, async (req, res, next) => {
   try {
     const { data, error } = await supabase
       .from('whatsapp_sessions')
-      .select('*')
+      .select('id, user_id, account_name, qr_code, is_authenticated, created_at')
       .eq('user_id', req.user.id)
       .order('created_at', { ascending: false });
     if (error) return jsonError(res, 500, 'Failed to load sessions');
-    res.json({ sessions: data });
+    res.json({ sessions: data.map(publicSession) });
   } catch (err) {
     next(err);
   }
