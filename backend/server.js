@@ -23,6 +23,13 @@ const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN || '*' }));
 app.use(express.json({ limit: '2mb' }));
 
+app.use((req, res, next) => {
+  if (req.path.length > 1 && req.path.endsWith('/')) {
+    req.url = req.url.replace(/\/+$/, '') || '/';
+  }
+  next();
+});
+
 /* ----------------------------- helpers ----------------------------- */
 
 function requireAuth(req, res, next) {
