@@ -18,7 +18,7 @@ frontend (Vercel)  -->  backend (Railway)  -->  Supabase Postgres
 
 ## 2. Deploy the backend (Railway)
 
-The backend lives at the repo root (`server.js`, `package.json`, `Procfile`, `railway.toml`), so no root-directory setting is needed.
+A `Dockerfile` at the repo root runs the backend (which lives in `backend/`). Railway auto-detects the Dockerfile — no root-directory setting needed.
 
 1. On railway.app, create a new project and deploy from the repo.
 2. Add these environment variables (Railway > project > Variables):
@@ -27,11 +27,12 @@ The backend lives at the repo root (`server.js`, `package.json`, `Procfile`, `ra
    - `JWT_SECRET` - any long random string, e.g. run `openssl rand -hex 32`
    - `CLIENT_ORIGIN` - the Vercel app URL once deployed (defaults to `*` otherwise)
    - `NODE_ENV=production`
-3. Railway auto-detects the `railway.toml` and starts `node server.js`.
-4. WhatsApp requires a headless Chrome. whatsapp-web.js bundles Puppeteer, which downloads Chromium during `npm install`. For most free plans the default works.
-5. Open the generated domain and check `/health` returns `{"ok":true}`.
+3. Railway builds the Dockerfile (Node 22 + Chromium system libraries) and starts `node server.js`.
+4. Open the generated domain and check `/health` returns `{"ok":true}`.
 
 ## 3. Deploy the frontend (Vercel)
+
+The repo root intentionally has no `package.json`, so Vercel only ever builds the `frontend/` subfolder.
 
 1. On vercel.com, import the same repo with root directory set to `frontend`.
 2. Add environment variable `VITE_API_URL` = your Railway backend URL, e.g. `https://yourapp.up.railway.app`.
@@ -50,8 +51,9 @@ The backend lives at the repo root (`server.js`, `package.json`, `Procfile`, `ra
 
 ## 5. Local development
 
-Backend (run from the repo root):
+Backend (run from the `backend/` folder):
 ```bash
+cd backend
 npm install
 copy .env.example .env   # fill in SUPABASE_URL, SUPABASE_KEY, JWT_SECRET
 npm run dev              # http://localhost:8080
