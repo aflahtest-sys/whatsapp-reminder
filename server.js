@@ -541,7 +541,9 @@ async function processDue() {
 
 /* ----------------------------- misc -------------------------------- */
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+app.get(['/health', '/health/'], (req, res) => res.json({ ok: true }));
+
+app.get('/', (req, res) => res.json({ ok: true, name: 'whatsapp-reminder-backend', health: '/health' }));
 
 app.use((req, res) => jsonError(res, 404, 'Route not found'));
 
