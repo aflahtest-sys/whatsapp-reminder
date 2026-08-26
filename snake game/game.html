@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Snake Maze</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <a href="index.html" class="back-btn">&#8592; Menu</a>
+
+    <div class="game-hud">
+        <span><span class="label">Score</span> <span class="value" id="score">0</span></span>
+        <span><span class="label">Lives</span> <span class="value" id="lives">♥♥♥</span></span>
+        <span><span class="label">Level</span> <span class="value" id="level">1</span></span>
+        <span><span class="label">Trail</span> <span class="value" id="trailLen">0</span></span>
+    </div>
+
+    <div class="game-container">
+        <canvas id="gameCanvas"></canvas>
+        <div class="dot-legend">
+            <span class="legend-item"><span class="dot-icon red"></span>+10</span>
+            <span class="legend-item"><span class="dot-icon blue"></span>+20</span>
+            <span class="legend-item"><span class="dot-icon cyan"></span>+30</span>
+        </div>
+    </div>
+
+    <div class="overlay" id="startOverlay">
+        <h1>Snake Maze</h1>
+        <p>Navigate the maze, collect colored dots to grow your trail, and avoid the ghosts. Don't cross your own tail!</p>
+        <div class="how-to-play">
+            <div class="how-row"><span class="dot-icon red"></span> Red dots — 10 pts, +4 trail</div>
+            <div class="how-row"><span class="dot-icon blue"></span> Blue dots — 20 pts, +4 trail</div>
+            <div class="how-row"><span class="dot-icon cyan"></span> Cyan dots — 30 pts, +4 trail</div>
+            <div class="how-row ghost-row">👻 Ghosts — avoid them!</div>
+        </div>
+        <button class="btn" id="startBtn">Start Game</button>
+    </div>
+
+    <div class="overlay" id="gameOverOverlay" style="display:none">
+        <h2>Game Over</h2>
+        <div class="final-score">Score: <span id="finalScore">0</span></div>
+        <button class="btn" id="restartBtn">Play Again</button>
+        <a href="index.html" class="btn btn-secondary">Menu</a>
+    </div>
+
+    <div class="overlay" id="winOverlay" style="display:none">
+        <h2>Level Complete!</h2>
+        <div class="final-score">Score: <span id="winScore">0</span></div>
+        <button class="btn" id="nextLevelBtn">Next Level</button>
+        <a href="index.html" class="btn btn-secondary">Menu</a>
+    </div>
+
+    <div class="touch-controls" id="touchControls">
+        <div class="touch-dpad">
+            <div class="touch-btn up" data-dir="up">&#9650;</div>
+            <div class="touch-btn down" data-dir="down">&#9660;</div>
+            <div class="touch-btn left" data-dir="left">&#9664;</div>
+            <div class="touch-btn right" data-dir="right">&#9654;</div>
+        </div>
+    </div>
+
+    <script src="js/game.js"></script>
+</body>
+</html>

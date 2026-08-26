@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "build",
+  "agent": {
+    "build": {
+      "description": "Main coding agent for implementation tasks",
+      "model": "omniroute/hf/deepseek-ai/DeepSeek-V3"
+    },
+    "plan": {
+      "description": "Planning and reasoning agent",
+      "model": "omniroute/gemini/gemini-3.5-flash"
+    },
+    "explore": {
+      "description": "Codebase exploration agent",
+      "model": "omniroute/hf/Qwen/Qwen2.5-7B-Instruct"
+    },
+    "general": {
+      "description": "General purpose agent",
+      "model": "omniroute/gemini/gemini-3.1-flash-lite"
+    }
+  }
+}

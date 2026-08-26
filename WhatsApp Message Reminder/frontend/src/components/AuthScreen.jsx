@@ -1,0 +1,82 @@
+import { useState } from 'react';
+import api, { setToken } from '../api.js';
+
+export default function AuthScreen({ onAuthed }) {
+  const [mode, setMode] = useState('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const registering = mode === 'register';
+
+  async function submit(e) {
+    e.preventDefault();
+    setError('');
+
+    if (registering && password.length < 8) {
+      setError('Password must be at least 8 characters');
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const path = registering ? '/auth/register' : '/auth/login';
+      const data = await api(path, { method: 'POST', body: { email, password } });
+      setToken(data.token);
+      onAuthed(data.user);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="auth-wrap">
+      <form className="card auth-card" onSubmit={submit}>
+        <h1>WhatsApp Reminders</h1>
+        <p className="muted">{registering ? 'Create an account' : 'Sign in to your account'}</p>
+
+        <label htmlFor="email">Email</label>
+        <input
+          id="email"
+          type="email"
+          required
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@company.com"
+        />
+
+        <label htmlFor="password">Password</label>
+        <input
+          id="password"
+          type="password"
+          required
+          minLength={registering ? 8 : undefined}
+          autoComplete={registering ? 'new-password' : 'current-password'}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder={registering ? 'At least 8 characters' : 'Your password'}
+        />
+
+        {error && <p className="error">{error}</p>}
+
+        <button className="btn primary block" disabled={busy}>
+          {busy ? 'Please wait...' : registering ? 'Create account' : 'Sign in'}
+        </button>
+        <button
+          type="button"
+          className="btn ghost block"
+          onClick={() => {
+            setMode(registering ? 'login' : 'register');
+            setError('');
+          }}
+        >
+          {registering ? 'Have an account? Sign in' : 'Need an account? Register'}
+        </button>
+      </form>
+    </div>
+  );
+}

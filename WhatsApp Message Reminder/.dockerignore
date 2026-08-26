@@ -1,0 +1,19 @@
+# Without this, `COPY backend/ .` overwrites the Linux node_modules that npm ci
+# just built with whatever is on your Windows machine. Chromium and other native
+# binaries then fail to run inside the container.
+**/node_modules
+**/dist
+
+# Never bake secrets into an image.
+**/.env
+**/.env.*
+
+# A linked WhatsApp session must come from the mounted volume, not the image.
+**/.wwebjs_auth
+**/.wwebjs_cache
+**/session-*
+
+**/*.log
+**/.git
+**/.gitignore
+**/test

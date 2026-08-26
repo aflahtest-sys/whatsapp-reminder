@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: queensgarden
+      POSTGRES_PASSWORD: queensgarden
+      POSTGRES_DB: queensgarden
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queensgarden -d queensgarden"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://queensgarden:queensgarden@db:5432/queensgarden?schema=public
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in .env}
+      AUTH_URL: http://localhost:3000
+      AUTH_TRUST_HOST: "true"
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-aflah@queensgarden.ai}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-Admin@12345}
+      SEED_OWNER_EMAIL: ${SEED_OWNER_EMAIL:-owner@queensgarden.ai}
+      SEED_OWNER_PASSWORD: ${SEED_OWNER_PASSWORD:-Owner@12345}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

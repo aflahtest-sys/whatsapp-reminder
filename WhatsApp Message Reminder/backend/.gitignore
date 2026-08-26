@@ -1,0 +1,19 @@
+# Secrets - never commit these.
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# WhatsApp logged-in browser profile. Contains credentials that can send
+# messages as your account. Never commit it.
+.wwebjs_auth/
+.wwebjs_cache/
+session-*/
+
+# Logs
+*.log
+server.out.log
+server.err.log
+npm-debug.log*

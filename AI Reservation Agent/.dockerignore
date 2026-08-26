@@ -1,0 +1,15 @@
+node_modules
+.next
+.next-profiles
+out
+.git
+.gitignore
+*.log
+.env
+.env*.local
+generated
+coverage
+Dockerfile
+docker-compose.yml
+README.md
+scripts

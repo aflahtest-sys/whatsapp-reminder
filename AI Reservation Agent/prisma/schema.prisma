@@ -1,0 +1,295 @@
+// Queens Garden AI — schema from architecture.md section 4.
+// Datasource URL is provided via prisma.config.ts (Prisma 7 convention).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  PLATFORM_ADMIN
+  ORG_OWNER
+  ORG_STAFF
+}
+
+enum ReservationStatus {
+  PAYMENT_PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentType {
+  DEPOSIT
+  BALANCE
+  REFUND
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  MANUAL
+  ONLINE
+}
+
+enum ConversationChannel {
+  WHATSAPP
+  INSTAGRAM
+  WEB_CHAT
+}
+
+enum ConversationStatus {
+  AI_HANDLING
+  NEEDS_ATTENTION
+  HUMAN_HANDLING
+  CLOSED
+}
+
+enum MessageSender {
+  CUSTOMER
+  AI
+  STAFF
+}
+
+enum ReservationSource {
+  MANUAL
+  WHATSAPP
+  INSTAGRAM
+  WEB_CHAT
+}
+
+enum KnowledgeType {
+  FACILITY
+  POLICY
+  FAQ
+  LOCATION
+  CONTACT
+  OTHER
+}
+
+enum IntegrationType {
+  WHATSAPP
+  INSTAGRAM
+  OPENAI
+  PAYMENT_PROVIDER
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users      User[]
+  properties Property[]
+}
+
+model User {
+  id             String        @id @default(cuid())
+  email          String        @unique
+  passwordHash   String
+  name           String
+  role           UserRole
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+}
+
+model Property {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  organization          Organization @relation(fields: [organizationId], references: [id])
+  name                  String
+  slug                  String   @unique
+  description           String   @db.Text
+  addressText           String
+  mapsUrl               String?
+  latitude              Decimal? @db.Decimal(9, 6)
+  longitude             Decimal? @db.Decimal(9, 6)
+  maxGuests             Int
+  bedrooms              Int
+  beds                  Int
+  bathrooms             Int
+  facilities            Json
+  checkInTime           String
+  checkOutTime          String
+  minStayNights         Int      @default(1)
+  allowSameDayBooking   Boolean  @default(true)
+  currency              String   @default("OMR")
+  depositAmount         Decimal  @db.Decimal(10, 2) @default(50)
+  cancellationRefundDays Int     @default(7)
+  status                String   @default("active")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  images        PropertyImage[]
+  pricingRules  PricingRule[]
+  reservations  Reservation[]
+  blockedDates  BlockedDate[]
+  knowledgeBase KnowledgeBaseEntry[]
+  conversations Conversation[]
+  integrations  IntegrationCredential[]
+}
+
+model PropertyImage {
+  id         String   @id @default(cuid())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id])
+  url        String
+  altText    String?
+  sortOrder  Int      @default(0)
+}
+
+model PricingRule {
+  id               String   @id @default(cuid())
+  propertyId       String
+  property         Property @relation(fields: [propertyId], references: [id])
+  name             String
+  pricePerNight    Decimal  @db.Decimal(10, 2)
+  startDate        DateTime? @db.Date
+  endDate          DateTime? @db.Date
+  priority         Int
+  isDefault        Boolean  @default(false)
+  isRecurringHijri Boolean  @default(false)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([propertyId, startDate, endDate])
+}
+
+model Customer {
+  id                String   @id @default(cuid())
+  organizationId    String
+  name              String
+  phone             String
+  email             String?
+  preferredLanguage String   @default("en")
+  whatsappId        String?
+  instagramId       String?
+  notes             String?  @db.Text
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  reservations  Reservation[]
+  conversations Conversation[]
+
+  @@unique([organizationId, phone])
+}
+
+model Reservation {
+  id                 String            @id @default(cuid())
+  propertyId         String
+  property           Property          @relation(fields: [propertyId], references: [id])
+  customerId         String
+  customer           Customer          @relation(fields: [customerId], references: [id])
+  checkIn            DateTime          @db.Date
+  checkOut           DateTime          @db.Date
+  guests             Int
+  nights             Int
+  priceBreakdown     Json
+  totalPrice         Decimal           @db.Decimal(10, 2)
+  depositAmount      Decimal           @db.Decimal(10, 2)
+  remainingBalance   Decimal           @db.Decimal(10, 2)
+  status             ReservationStatus @default(PAYMENT_PENDING)
+  source             ReservationSource @default(MANUAL)
+  cancellationReason String?
+  depositRefundable  Boolean?
+  notes              String?           @db.Text
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  payments Payment[]
+
+  @@index([propertyId, checkIn, checkOut])
+}
+
+model BlockedDate {
+  id         String   @id @default(cuid())
+  propertyId String
+  property   Property @relation(fields: [propertyId], references: [id])
+  startDate  DateTime @db.Date
+  endDate    DateTime @db.Date
+  reason     String?
+  createdBy  String
+  createdAt  DateTime @default(now())
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  reservationId     String
+  reservation       Reservation   @relation(fields: [reservationId], references: [id])
+  type              PaymentType
+  amount            Decimal       @db.Decimal(10, 2)
+  status            PaymentStatus @default(PENDING)
+  method            PaymentMethod @default(MANUAL)
+  providerReference String?
+  verifiedBy        String?
+  paidAt            DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+}
+
+model KnowledgeBaseEntry {
+  id         String        @id @default(cuid())
+  propertyId String
+  property   Property      @relation(fields: [propertyId], references: [id])
+  type       KnowledgeType
+  question   String?
+  contentEn  String        @db.Text
+  contentAr  String        @db.Text
+  isActive   Boolean       @default(true)
+  sortOrder  Int           @default(0)
+  updatedAt  DateTime      @updatedAt
+}
+
+model Conversation {
+  id              String              @id @default(cuid())
+  propertyId      String
+  property        Property            @relation(fields: [propertyId], references: [id])
+  customerId      String
+  customer        Customer            @relation(fields: [customerId], references: [id])
+  channel         ConversationChannel
+  status          ConversationStatus  @default(AI_HANDLING)
+  assignedStaffId String?
+  lastMessageAt   DateTime            @default(now())
+  createdAt       DateTime            @default(now())
+
+  messages Message[]
+}
+
+model Message {
+  id                String         @id @default(cuid())
+  conversationId    String
+  conversation      Conversation   @relation(fields: [conversationId], references: [id])
+  sender            MessageSender
+  senderUserId      String?
+  content           String         @db.Text
+  language          String?
+  metadata          Json?
+  externalMessageId String?
+  createdAt         DateTime       @default(now())
+}
+
+model IntegrationCredential {
+  id        String          @id @default(cuid())
+  propertyId String
+  property  Property        @relation(fields: [propertyId], references: [id])
+  type      IntegrationType
+  config    Json
+  isActive  Boolean         @default(true)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+}
