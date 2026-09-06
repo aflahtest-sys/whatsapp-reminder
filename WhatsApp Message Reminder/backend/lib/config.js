@@ -12,6 +12,8 @@ const {
   PUPPETEER_EXECUTABLE_PATH,
   DEFAULT_COUNTRY_CODE,
   APP_TIMEZONE,
+  WA_VERIFY_NUMBER,
+  WA_SEND_TIMEOUT_MS,
   WA_WEB_CACHE,
   WA_WEB_VERSION_URL,
   RESEND_API_KEY,
@@ -73,6 +75,14 @@ module.exports = {
   // WhatsApp actually serves -- a common cause of the browser dying mid-send.
   waWebCache: (WA_WEB_CACHE || 'none').toLowerCase(),
   waWebVersionUrl: WA_WEB_VERSION_URL || '',
+
+  // Check the number exists on WhatsApp before sending. Clearer errors, but one
+  // extra trip into the browser per message -- too expensive on a small box.
+  waVerifyNumber: String(WA_VERIFY_NUMBER || '').toLowerCase() === 'true',
+
+  // How long one message may take. Generous, because a squeezed Chromium is
+  // slow rather than broken, and a slow delivery still beats a failed one.
+  waSendTimeoutMs: Number(WA_SEND_TIMEOUT_MS) || 150_000,
 
   // Numbers typed without a country code are assumed to be from here.
   // 968 = Oman. Change it if your clients are elsewhere.

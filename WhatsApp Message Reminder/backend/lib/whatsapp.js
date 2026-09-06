@@ -440,28 +440,28 @@ async function sendMessage(userId, phone, body) {
   }
 
   try {
-    // Sending to a number that has no WhatsApp account throws a confusing
-    // internal error, so check first and report something a human can act on.
+    // The pre-flight "is this number on WhatsApp?" check is a nicety, not a
+    // requirement: it turns an obscure internal failure into a clear message.
+    // But it costs a full round trip into the browser page, and on a
+    // memory-starved container that alone was taking 30 seconds -- half the
+    // budget, spent before the actual send had even started. Off by default;
+    // set WA_VERIFY_NUMBER=true where the browser has room to breathe.
     let chatId = toWhatsAppId(phone);
-    try {
-      const numberId = await withTimeout(entry.client.getNumberId(phone), 30_000, 'Number lookup');
-      if (!numberId) {
-        return {
-          ok: false,
-          error: 'This number is not registered on WhatsApp',
-          permanent: true,
-        };
+
+    if (config.waVerifyNumber) {
+      try {
+        const numberId = await withTimeout(entry.client.getNumberId(phone), 15_000, 'Number lookup');
+        if (!numberId) {
+          return { ok: false, error: 'This number is not registered on WhatsApp', permanent: true };
+        }
+        chatId = numberId._serialized || chatId;
+      } catch (err) {
+        if (isTransientBrowserError(err.message)) throw err;
+        console.warn('[wa] number lookup skipped:', err.message);
       }
-      chatId = numberId._serialized || chatId;
-    } catch (err) {
-      // A lookup failure is usually a connection problem rather than a bad
-      // number, so carry on and let the send itself decide -- unless the
-      // browser has died, in which case the send cannot work either.
-      if (isTransientBrowserError(err.message)) throw err;
-      console.warn('[wa] number lookup failed, sending anyway:', err.message);
     }
 
-    const sent = await withTimeout(entry.client.sendMessage(chatId, body), 60_000, 'Send');
+    const sent = await withTimeout(entry.client.sendMessage(chatId, body), config.waSendTimeoutMs, 'Send');
     return { ok: true, id: sent && sent.id ? sent.id._serialized : null };
   } catch (err) {
     const message = String((err && err.message) || err);
