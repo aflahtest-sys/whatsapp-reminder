@@ -250,6 +250,48 @@ function scheduleReconnect(userId, sessionId) {
   reconnectTimers.set(userId, timer);
 }
 
+/**
+ * Remove Chromium's leftover profile locks.
+ *
+ * Chromium writes SingletonLock/Cookie/Socket into its profile directory and
+ * clears them on a clean exit. A container that gets replaced mid-flight never
+ * exits cleanly, so the files survive on the mounted volume -- stamped with the
+ * OLD container's hostname. The next container reads them, concludes that
+ * "another Chromium on another computer" holds the profile, and refuses to
+ * start with exit code 21. Nothing recovers from that on its own: every restart
+ * finds the same stale lock, so the QR code never appears again.
+ *
+ * The lock only means something while the process that wrote it is alive. Each
+ * container is a fresh machine with a fresh filesystem namespace, so anything
+ * found here at startup is by definition dead.
+ */
+function clearProfileLocks(userId) {
+  const dir = path.join(config.waSessionPath, `session-u-${userId}`);
+  const locks = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+  let removed = 0;
+
+  for (const name of locks) {
+    const target = path.join(dir, name);
+    try {
+      // lstat, not exists: SingletonLock is a symlink pointing at
+      // <hostname>-<pid>, and once that host is gone the link dangles, which
+      // makes existsSync report false while the file is still very much there.
+      fs.lstatSync(target);
+      fs.rmSync(target, { force: true });
+      removed += 1;
+    } catch (err) {
+      if (err.code !== 'ENOENT') {
+        console.warn(`[wa] could not clear ${name}:`, err.message);
+      }
+    }
+  }
+
+  if (removed) {
+    log(`cleared ${removed} stale Chromium lock file(s) for user ${userId}`);
+  }
+  return removed;
+}
+
 /** True when LocalAuth has credentials on disk for this user. */
 function hasStoredSession(userId) {
   return fs.existsSync(path.join(config.waSessionPath, `session-u-${userId}`));
@@ -277,6 +319,8 @@ function statusFor(userId) {
 async function startClient(userId, sessionRow) {
   const existing = clients.get(userId);
   if (existing) return existing;
+
+  clearProfileLocks(userId);
 
   const entry = buildClient(userId, sessionRow.id);
   clients.set(userId, entry);
@@ -482,6 +526,7 @@ module.exports = {
   isReady,
   statusFor,
   hasStoredSession,
+  clearProfileLocks,
   isTransientBrowserError,
   withTimeout,
   startClient,

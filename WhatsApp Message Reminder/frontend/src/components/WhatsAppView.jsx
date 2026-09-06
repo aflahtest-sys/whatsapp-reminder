@@ -99,18 +99,37 @@ export default function WhatsAppView({ notify }) {
         bulk messages get banned.
       </div>
 
-      {!sessions.length && loaded && (
+      {/* Shown whenever the account is not connected -- not only on a first
+          run. Hiding this once a session row existed meant that after WhatsApp
+          was unlinked from the phone, the only way back was a small "Restart"
+          button, which does not read as "link my account again". */}
+      {!connected && loaded && (
         <div className="card">
+          {sessions.length > 0 && (
+            <p className="muted">
+              This account is not connected. Link it again to start sending.
+            </p>
+          )}
           <div className="row">
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Account name (optional, e.g. IFDC Service)"
-            />
-            <button className="btn primary" onClick={() => link(false)} disabled={busy}>
+            {!sessions.length && (
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Account name (optional, e.g. IFDC Service)"
+              />
+            )}
+            <button
+              className="btn primary"
+              onClick={() => link(sessions.length > 0)}
+              disabled={busy}
+            >
               {busy ? 'Linking...' : 'Link WhatsApp account'}
             </button>
           </div>
+          <p className="muted small">
+            A QR code takes up to a minute to appear. Clicking again starts another
+            browser and makes it slower, so give it time.
+          </p>
           {error && <p className="error">{error}</p>}
         </div>
       )}
