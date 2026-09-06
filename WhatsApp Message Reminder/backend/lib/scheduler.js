@@ -328,6 +328,30 @@ async function processDue() {
 
     await Promise.all(
       [...byUser.values()].map(async (userSchedules) => {
+        // One check per account, not one per schedule. With WhatsApp offline
+        // every due schedule used to be claimed, examined and released on every
+        // single tick -- twenty-five rows a minute, forever, hammering both the
+        // database and a browser that was already struggling. Nothing can be
+        // sent while the account is offline, so skip the whole group and let
+        // the next tick try again.
+        const userId = userSchedules[0].user_id;
+        if (!whatsapp.isReady(whatsapp.getEntry(userId))) {
+          const expired = userSchedules.filter(
+            (s) =>
+              (s.send_type === 'immediate' || s.send_type === 'once') &&
+              recurrence.isPastGrace(s.schedule_time, opts.graceHours)
+          );
+
+          if (!expired.length) {
+            log(
+              `WhatsApp offline for user ${userId}; leaving ${userSchedules.length} schedule(s) for later`
+            );
+            return;
+          }
+          // Only the ones that have waited too long need touching now.
+          userSchedules = expired;
+        }
+
         for (const schedule of userSchedules) {
           const claimed = await claim(schedule);
           if (!claimed) continue; // another worker got it, or it was cancelled

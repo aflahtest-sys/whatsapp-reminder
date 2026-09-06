@@ -56,6 +56,42 @@ function setState(entry, state) {
   entry.stateChangedAt = Date.now();
 }
 
+/**
+ * How to resolve the WhatsApp Web version.
+ *
+ * A cached copy on disk can go stale and stop matching what WhatsApp actually
+ * serves, which produces exactly the "Execution context was destroyed" failures
+ * this app was seeing. Default is therefore to fetch fresh each time. Set
+ * WA_WEB_CACHE=local to cache, or WA_WEB_VERSION_URL to pin a known-good build.
+ */
+function webVersionOptions() {
+  const mode = config.waWebCache;
+
+  if (mode === 'remote' && config.waWebVersionUrl) {
+    return { webVersionCache: { type: 'remote', remotePath: config.waWebVersionUrl } };
+  }
+  if (mode === 'local') {
+    return { webVersionCache: { type: 'local', path: path.join(config.waSessionPath, '.wwebjs_cache') } };
+  }
+  return { webVersionCache: { type: 'none' } };
+}
+
+/** Puppeteer failures that mean "the browser died", not "the message is bad". */
+const TRANSIENT = /execution context was destroyed|target closed|session closed|protocol error|detached frame|browser has disconnected|navigation|page crashed|websocket|econnreset/i;
+
+function isTransientBrowserError(message) {
+  return TRANSIENT.test(String(message || ''));
+}
+
+/** Never let a hung page hold an HTTP request open forever. */
+function withTimeout(promise, ms, label) {
+  let timer;
+  const limit = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+  });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
 function buildClient(userId, sessionId) {
   ensureSessionDir();
 
@@ -67,6 +103,14 @@ function buildClient(userId, sessionId) {
     puppeteer: {
       headless: true,
       executablePath: config.puppeteerExecutablePath,
+      // On a CPU-starved container Chromium cannot always answer a devtools
+      // call inside the default window, and puppeteer gives up with
+      // "Runtime.callFunctionOn timed out". Slow is better than failed.
+      protocolTimeout: 240_000,
+      // Chromium is the memory hog in this container. When it is squeezed, the
+      // renderer is killed and any send in flight dies with
+      // "Execution context was destroyed" -- so trim everything not needed to
+      // render one chat page.
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -74,14 +118,19 @@ function buildClient(userId, sessionId) {
         '--disable-gpu',
         '--no-first-run',
         '--no-default-browser-check',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-accelerated-2d-canvas',
+        '--disable-breakpad',
+        '--disable-sync',
+        '--mute-audio',
+        '--no-zygote',
       ],
     },
-    // Without this, a WhatsApp Web update can break the library mid-flight.
-    // Pinning the cache to disk keeps a working copy around.
-    webVersionCache: {
-      type: 'local',
-      path: path.join(config.waSessionPath, '.wwebjs_cache'),
-    },
+    ...webVersionOptions(),
     qrMaxRetries: 0,
     takeoverOnConflict: true,
   });
@@ -351,7 +400,7 @@ async function sendMessage(userId, phone, body) {
     // internal error, so check first and report something a human can act on.
     let chatId = toWhatsAppId(phone);
     try {
-      const numberId = await entry.client.getNumberId(phone);
+      const numberId = await withTimeout(entry.client.getNumberId(phone), 30_000, 'Number lookup');
       if (!numberId) {
         return {
           ok: false,
@@ -361,19 +410,64 @@ async function sendMessage(userId, phone, body) {
       }
       chatId = numberId._serialized || chatId;
     } catch (err) {
-      // Lookup failure is a connection problem, not a bad number -- keep going
-      // and let the send itself decide.
+      // A lookup failure is usually a connection problem rather than a bad
+      // number, so carry on and let the send itself decide -- unless the
+      // browser has died, in which case the send cannot work either.
+      if (isTransientBrowserError(err.message)) throw err;
       console.warn('[wa] number lookup failed, sending anyway:', err.message);
     }
 
-    const sent = await entry.client.sendMessage(chatId, body);
+    const sent = await withTimeout(entry.client.sendMessage(chatId, body), 60_000, 'Send');
     return { ok: true, id: sent && sent.id ? sent.id._serialized : null };
   } catch (err) {
     const message = String((err && err.message) || err);
-    // "Evaluation failed" / "Session closed" mean the browser died: retryable.
+
+    if (isTransientBrowserError(message)) {
+      // The headless browser crashed or navigated out from under us. The number
+      // and the message are fine; the session needs rebuilding. Do that in the
+      // background and tell the caller to come back shortly -- the scheduler
+      // retries on its next tick anyway.
+      console.error(`[wa] browser session lost while sending for user ${userId}: ${message}`);
+      recoverSession(userId);
+      return {
+        ok: false,
+        permanent: false,
+        error: 'The WhatsApp connection dropped mid-send and is restarting. Try again in a minute.',
+      };
+    }
+
     const permanent = /invalid.*(number|wid)|not.*registered/i.test(message);
     return { ok: false, error: message.slice(0, 500), permanent };
   }
+}
+
+/**
+ * Rebuild a broken session without blocking whoever hit the error.
+ *
+ * Guarded so that a batch of failing sends triggers one restart, not twenty.
+ */
+const recovering = new Set();
+
+function recoverSession(userId) {
+  if (recovering.has(userId)) return;
+  recovering.add(userId);
+
+  const entry = getEntry(userId);
+  const sessionId = entry ? entry.sessionId : null;
+
+  (async () => {
+    try {
+      await stopClient(userId);
+      if (sessionId && hasStoredSession(userId)) {
+        log(`rebuilding session for user ${userId} after a browser crash`);
+        await startClient(userId, { id: sessionId });
+      }
+    } catch (err) {
+      console.error('[wa] session recovery failed:', err.message);
+    } finally {
+      recovering.delete(userId);
+    }
+  })();
 }
 
 async function shutdownAll() {
@@ -388,6 +482,8 @@ module.exports = {
   isReady,
   statusFor,
   hasStoredSession,
+  isTransientBrowserError,
+  withTimeout,
   startClient,
   stopClient,
   restartClient,

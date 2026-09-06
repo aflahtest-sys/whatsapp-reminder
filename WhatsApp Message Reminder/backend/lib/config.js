@@ -12,6 +12,8 @@ const {
   PUPPETEER_EXECUTABLE_PATH,
   DEFAULT_COUNTRY_CODE,
   APP_TIMEZONE,
+  WA_WEB_CACHE,
+  WA_WEB_VERSION_URL,
   RESEND_API_KEY,
   MAIL_FROM,
   APP_URL,
@@ -65,6 +67,12 @@ module.exports = {
   // and you have to scan the QR code again.
   waSessionPath: WA_SESSION_PATH || './.wwebjs_auth',
   puppeteerExecutablePath: PUPPETEER_EXECUTABLE_PATH || undefined,
+
+  // How the WhatsApp Web version is resolved. 'none' (the default) fetches it
+  // fresh, which avoids a stale cached copy drifting out of step with what
+  // WhatsApp actually serves -- a common cause of the browser dying mid-send.
+  waWebCache: (WA_WEB_CACHE || 'none').toLowerCase(),
+  waWebVersionUrl: WA_WEB_VERSION_URL || '',
 
   // Numbers typed without a country code are assumed to be from here.
   // 968 = Oman. Change it if your clients are elsewhere.
