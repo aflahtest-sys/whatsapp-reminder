@@ -652,3 +652,36 @@ h3 {
     max-width: none;
   }
 }
+
+/* ------------------------- auth / account extras --------------------- */
+
+.link-btn {
+  display: block;
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.35rem 0;
+  border: 0;
+  background: none;
+  color: var(--auth-link, #1d4ed8);
+  font: inherit;
+  font-size: 0.875rem;
+  text-align: center;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.link-btn:hover {
+  color: #1e40af;
+}
+
+/* The auth card reuses the .check block from the tables/status styles, so it
+   needs those tokens available outside a card context too. */
+.auth-card .check,
+.auth-card .gotcha {
+  text-align: left;
+}
+
+.auth-card .field {
+  margin-top: 0.75rem;
+}

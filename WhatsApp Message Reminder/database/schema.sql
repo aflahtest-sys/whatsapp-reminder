@@ -13,6 +13,18 @@ create table if not exists public.users (
   created_at timestamptz not null default now()
 );
 
+-- Password-reset links. Only the SHA-256 hash of each token is kept, so a copy
+-- of this table cannot be turned back into working reset links.
+create table if not exists public.password_resets (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  token_hash text not null,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  requested_ip text,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists public.whatsapp_sessions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(id) on delete cascade,
@@ -75,6 +87,12 @@ alter table public.customers
 alter table public.whatsapp_sessions
   add column if not exists last_ready_at timestamptz;
 
+-- users.password_changed_at: resetting a password should end sessions on other
+-- devices. JWTs cannot be withdrawn once issued, so the backend compares each
+-- token's issued-at against this instead.
+alter table public.users
+  add column if not exists password_changed_at timestamptz;
+
 -- scheduled_sends: bulk targeting, weekday selection, crash-safe job claiming.
 alter table public.scheduled_sends
   add column if not exists target_type text not null default 'customer',
@@ -128,6 +146,8 @@ alter table public.delivery_logs
 /* ----------------------------- indexes ------------------------------ */
 
 create index if not exists idx_sessions_user on public.whatsapp_sessions (user_id);
+create index if not exists idx_password_resets_hash on public.password_resets (token_hash);
+create index if not exists idx_password_resets_user on public.password_resets (user_id);
 create index if not exists idx_customers_user on public.customers (user_id);
 create index if not exists idx_customers_tags on public.customers using gin (tags);
 create index if not exists idx_templates_user on public.message_templates (user_id);
@@ -137,6 +157,81 @@ create index if not exists idx_schedules_due on public.scheduled_sends (status, 
   where status = 'active';
 create index if not exists idx_logs_user on public.delivery_logs (user_id, sent_at desc);
 create index if not exists idx_logs_schedule on public.delivery_logs (schedule_id);
+
+/* ------------------- merge duplicate customer records ---------------- */
+-- One phone number per account is enforced below. Before that index can be
+-- created, existing duplicates have to be resolved -- and the same person saved
+-- three times ("aamar", "amar", "ammar nabil") has been receiving three copies
+-- of every reminder, which is the whole reason for the rule.
+--
+-- Nothing is thrown away. For each (user_id, phone) the OLDEST record survives;
+-- reminders and delivery history belonging to the other records are re-pointed
+-- at it, and only then are the extra records removed.
+
+-- 1. Reminders follow the surviving customer.
+update public.scheduled_sends s
+   set customer_id = k.keep_id
+  from (
+        select c.id as dup_id,
+               first_value(c.id) over (
+                 partition by c.user_id, c.phone
+                 order by c.created_at, c.id
+               ) as keep_id
+          from public.customers c
+       ) k
+ where s.customer_id = k.dup_id
+   and k.dup_id <> k.keep_id;
+
+-- 2. Delivery history follows too, so past messages stay attributable.
+update public.delivery_logs l
+   set customer_id = k.keep_id
+  from (
+        select c.id as dup_id,
+               first_value(c.id) over (
+                 partition by c.user_id, c.phone
+                 order by c.created_at, c.id
+               ) as keep_id
+          from public.customers c
+       ) k
+ where l.customer_id = k.dup_id
+   and k.dup_id <> k.keep_id;
+
+-- 3. Combine group tags onto the survivor.
+update public.customers t
+   set tags = m.merged
+  from (
+        select k.keep_id,
+               coalesce(array_agg(distinct tag), '{}')::text[] as merged
+          from (
+                select c.user_id,
+                       c.phone,
+                       first_value(c.id) over (
+                         partition by c.user_id, c.phone
+                         order by c.created_at, c.id
+                       ) as keep_id
+                  from public.customers c
+               ) k
+          join public.customers c2
+            on c2.user_id = k.user_id
+           and c2.phone = k.phone
+          cross join lateral unnest(c2.tags) as tag
+         group by k.keep_id
+       ) m
+ where t.id = m.keep_id
+   and t.tags <> m.merged;
+
+-- 4. Now the extra records can go; nothing references them any more.
+delete from public.customers c
+ using (
+        select c2.id as dup_id,
+               first_value(c2.id) over (
+                 partition by c2.user_id, c2.phone
+                 order by c2.created_at, c2.id
+               ) as keep_id
+          from public.customers c2
+       ) k
+ where c.id = k.dup_id
+   and k.dup_id <> k.keep_id;
 
 -- One phone number per account. Prevents the same client being messaged twice
 -- because they were added under two slightly different names.
@@ -170,6 +265,7 @@ create unique index if not exists uq_whatsapp_sessions_user
 -- query is filtered by user_id. Never expose the service role key to a browser.
 
 alter table public.users enable row level security;
+alter table public.password_resets enable row level security;
 alter table public.whatsapp_sessions enable row level security;
 alter table public.customers enable row level security;
 alter table public.message_templates enable row level security;
@@ -178,6 +274,7 @@ alter table public.delivery_logs enable row level security;
 
 -- Recreated on every run so re-running this file never errors on a duplicate name.
 drop policy if exists "deny anon users" on public.users;
+drop policy if exists "deny anon password resets" on public.password_resets;
 drop policy if exists "deny anon whatsapp sessions" on public.whatsapp_sessions;
 drop policy if exists "deny anon customers" on public.customers;
 drop policy if exists "deny anon templates" on public.message_templates;
@@ -193,6 +290,8 @@ drop policy if exists "users own schedules" on public.scheduled_sends;
 drop policy if exists "users own logs" on public.delivery_logs;
 
 create policy "deny anon users" on public.users
+  for all to anon, authenticated using (false) with check (false);
+create policy "deny anon password resets" on public.password_resets
   for all to anon, authenticated using (false) with check (false);
 create policy "deny anon whatsapp sessions" on public.whatsapp_sessions
   for all to anon, authenticated using (false) with check (false);

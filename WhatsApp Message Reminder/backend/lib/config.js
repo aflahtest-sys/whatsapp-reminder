@@ -12,6 +12,9 @@ const {
   PUPPETEER_EXECUTABLE_PATH,
   DEFAULT_COUNTRY_CODE,
   APP_TIMEZONE,
+  RESEND_API_KEY,
+  MAIL_FROM,
+  APP_URL,
   NODE_ENV,
 } = process.env;
 
@@ -69,6 +72,16 @@ module.exports = {
 
   // Used to render {date} / {time} / {day} inside message templates.
   timezone: APP_TIMEZONE || 'Asia/Muscat',
+
+  // Password-reset email. Without a key, /auth/forgot-password still answers
+  // normally but writes the reset link to the server log instead of sending it,
+  // so the feature is usable before the email service is wired up.
+  resendApiKey: RESEND_API_KEY || '',
+  mailFrom: MAIL_FROM || '',
+
+  // Where the frontend lives, used to build the link inside the reset email.
+  // Falls back to the first allowed CORS origin, which is almost always right.
+  appUrl: (APP_URL || allowedOrigins[0] || '').replace(/\/+$/, ''),
 
   scheduler: {
     // How many schedules to look at per tick.

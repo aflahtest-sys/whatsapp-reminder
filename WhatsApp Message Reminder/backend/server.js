@@ -13,6 +13,15 @@ const whatsapp = require('./lib/whatsapp');
 const scheduler = require('./lib/scheduler');
 const recurrence = require('./lib/recurrence');
 const { parsePhone, formatPhone } = require('./lib/phone');
+const mailer = require('./lib/mailer');
+const {
+  createResetToken,
+  hashResetToken,
+  isResetUsable,
+  isTokenOlderThanPassword,
+  buildResetUrl,
+  RESET_TTL_MS,
+} = require('./lib/tokens');
 const {
   PLACEHOLDERS,
   unknownPlaceholders,
@@ -88,16 +97,49 @@ function requireAuth(req, res, next) {
   }
   try {
     const payload = jwt.verify(header.slice(7), config.jwtSecret);
-    req.user = { id: payload.sub, email: payload.email };
+    req.user = { id: payload.sub, email: payload.email, issuedAt: payload.iat };
     next();
   } catch {
     return jsonError(res, 401, 'Invalid or expired token');
   }
 }
 
+/**
+ * Sessions revoked in this process since it started.
+ *
+ * A password change should log the account out everywhere, but a JWT cannot be
+ * withdrawn once signed. This map catches it immediately for as long as the
+ * process lives; /auth/me additionally compares each token against the stored
+ * password_changed_at, so a stale session is also ejected on the next page load
+ * even after a restart. Between those two, a leaked token is not usable for
+ * long -- though it is not the same guarantee as server-side sessions, which is
+ * worth knowing if this app ever holds anything more sensitive.
+ */
+const revokedBefore = new Map(); // userId -> epoch ms
+
+function revokeSessions(userId) {
+  revokedBefore.set(userId, Date.now());
+}
+
+function sessionRevoked(req) {
+  const cutoff = revokedBefore.get(req.user.id);
+  if (!cutoff) return false;
+  return isTokenOlderThanPassword(req.user.issuedAt, new Date(cutoff));
+}
+
 /** Wrap an async handler so a rejected promise reaches the error middleware. */
 function handler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+/** requireAuth plus the in-process revocation check. */
+function requireLiveSession(req, res, next) {
+  return requireAuth(req, res, () => {
+    if (sessionRevoked(req)) {
+      return jsonError(res, 401, 'Your password changed. Please sign in again.');
+    }
+    next();
+  });
 }
 
 /**
@@ -224,11 +266,215 @@ app.get(
   handler(async (req, res) => {
     const { data, error } = await supabase
       .from('users')
-      .select('id, email, created_at')
+      .select('id, email, created_at, password_changed_at')
       .eq('id', req.user.id)
       .maybeSingle();
     if (error || !data) return jsonError(res, 401, 'User not found');
-    res.json({ user: data });
+
+    // This route runs on every page load, which makes it the cheap place to
+    // catch a token that predates a password change -- including one that
+    // happened before this process started, which the in-memory map forgets.
+    if (isTokenOlderThanPassword(req.user.issuedAt, data.password_changed_at)) {
+      return jsonError(res, 401, 'Your password changed. Please sign in again.');
+    }
+
+    const { password_changed_at, ...user } = data;
+    res.json({ user });
+  })
+);
+
+/* -------------------------- password recovery ------------------------ */
+
+// Requesting a reset sends an email, so the limits are tighter than for login:
+// this is also the endpoint someone would abuse to spam a colleague's inbox.
+const forgotIpLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 15,
+  keyFn: (req) => `forgot-ip:${req.ip}`,
+  message: 'Too many reset requests. Please wait an hour and try again.',
+});
+
+const forgotEmailLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 4,
+  keyFn: (req) => `forgot-email:${String((req.body && req.body.email) || '').toLowerCase().trim()}`,
+  message: 'A reset link was already sent. Check your inbox, or wait an hour to request another.',
+});
+
+/**
+ * Start a reset.
+ *
+ * The reply is identical whether or not the address is registered. Saying "no
+ * such account" would turn this endpoint into a way to discover who has a
+ * login, which is exactly the list an attacker wants before trying passwords.
+ */
+app.post(
+  '/auth/forgot-password',
+  [forgotIpLimiter, forgotEmailLimiter],
+  handler(async (req, res) => {
+    const email = String((req.body && req.body.email) || '').toLowerCase().trim();
+
+    const sameAnswerEitherWay = () =>
+      res.json({
+        ok: true,
+        message: 'If that email has an account, a reset link is on its way. It expires in 60 minutes.',
+      });
+
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return jsonError(res, 400, 'Enter a valid email address');
+    }
+
+    const { data: user } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('email', email)
+      .maybeSingle();
+
+    if (!user) return sameAnswerEitherWay();
+
+    // Tidy up: expired and already-used rows have no further purpose.
+    await supabase
+      .from('password_resets')
+      .delete()
+      .or(`expires_at.lt.${new Date().toISOString()},used_at.not.is.null`);
+
+    const token = createResetToken();
+    const { error: insertError } = await supabase.from('password_resets').insert({
+      user_id: user.id,
+      token_hash: token.hash,
+      expires_at: token.expiresAt.toISOString(),
+      requested_ip: req.ip,
+    });
+
+    if (insertError) {
+      console.error('[auth] could not store reset token:', insertError.message);
+      return jsonError(res, 500, 'Could not start the reset. Please try again.');
+    }
+
+    const url = buildResetUrl(config.appUrl, token.raw);
+    const minutes = Math.round(RESET_TTL_MS / 60000);
+    const mail = mailer.resetPasswordEmail({ url, minutes });
+    const sent = await mailer.sendMail({ to: user.email, ...mail });
+
+    if (!sent.ok) {
+      // Without a mail service the feature would be unusable, so the link goes
+      // to the server log instead. Only someone with log access sees it.
+      console.warn(
+        `[auth] reset email not sent (${sent.configured ? sent.error : 'email not configured'}). ` +
+          `Reset link for ${user.email}: ${url}`
+      );
+    }
+
+    return sameAnswerEitherWay();
+  })
+);
+
+/** Finish a reset using the token from the email. */
+app.post(
+  '/auth/reset-password',
+  forgotIpLimiter,
+  handler(async (req, res) => {
+    const { token, password } = req.body || {};
+    if (!token) return jsonError(res, 400, 'This reset link is incomplete');
+    if (!password || String(password).length < 8) {
+      return jsonError(res, 400, 'Password must be at least 8 characters');
+    }
+
+    const { data: row } = await supabase
+      .from('password_resets')
+      .select('id, user_id, expires_at, used_at')
+      .eq('token_hash', hashResetToken(token))
+      .maybeSingle();
+
+    if (!isResetUsable(row)) {
+      return jsonError(
+        res,
+        400,
+        'This reset link has expired or was already used. Please request a new one.'
+      );
+    }
+
+    const now = new Date().toISOString();
+    const password_hash = await bcrypt.hash(String(password), 12);
+
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ password_hash, password_changed_at: now })
+      .eq('id', row.user_id);
+
+    if (updateError) {
+      console.error('[auth] reset update failed:', updateError.message);
+      return jsonError(res, 500, 'Could not set the new password. Please try again.');
+    }
+
+    // Burn this token, and every other outstanding one for the account -- if
+    // several reset emails were requested, none of the older links should still
+    // work now that the password has changed.
+    await supabase.from('password_resets').update({ used_at: now }).eq('id', row.id);
+    await supabase
+      .from('password_resets')
+      .delete()
+      .eq('user_id', row.user_id)
+      .is('used_at', null);
+
+    revokeSessions(row.user_id);
+
+    res.json({ ok: true, message: 'Password updated. You can sign in now.' });
+  })
+);
+
+/** Change your own password while signed in. */
+app.post(
+  '/auth/change-password',
+  requireAuth,
+  handler(async (req, res) => {
+    const { current_password, new_password } = req.body || {};
+    if (!current_password || !new_password) {
+      return jsonError(res, 400, 'Enter your current password and the new one');
+    }
+    if (String(new_password).length < 8) {
+      return jsonError(res, 400, 'New password must be at least 8 characters');
+    }
+    if (String(new_password) === String(current_password)) {
+      return jsonError(res, 400, 'The new password is the same as the current one');
+    }
+
+    const { data: user } = await supabase
+      .from('users')
+      .select('id, email, password_hash')
+      .eq('id', req.user.id)
+      .maybeSingle();
+
+    if (!user) return jsonError(res, 401, 'User not found');
+
+    const valid = await bcrypt.compare(String(current_password), user.password_hash);
+    if (!valid) return jsonError(res, 403, 'Your current password is not correct');
+
+    const now = new Date().toISOString();
+    const password_hash = await bcrypt.hash(String(new_password), 12);
+
+    const { error } = await supabase
+      .from('users')
+      .update({ password_hash, password_changed_at: now })
+      .eq('id', user.id);
+
+    if (error) {
+      console.error('[auth] change password failed:', error.message);
+      return jsonError(res, 500, 'Could not change the password. Please try again.');
+    }
+
+    // Any pending reset links are now meaningless.
+    await supabase.from('password_resets').delete().eq('user_id', user.id).is('used_at', null);
+
+    revokeSessions(user.id);
+
+    // Hand back a fresh token so the person who just changed their password is
+    // not immediately signed out of the tab they did it in. Other devices are.
+    res.json({
+      ok: true,
+      token: signToken(user),
+      message: 'Password changed. Other devices have been signed out.',
+    });
   })
 );
 
@@ -236,7 +482,7 @@ app.get(
 
 app.post(
   '/whatsapp/link',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const userId = req.user.id;
     const { account_name, restart } = req.body || {};
@@ -288,7 +534,7 @@ app.post(
 
 app.get(
   '/whatsapp/status',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { data, error } = await supabase
       .from('whatsapp_sessions')
@@ -304,7 +550,7 @@ app.get(
 
 app.post(
   '/whatsapp/disconnect',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { session_id } = req.body || {};
     if (!session_id) return jsonError(res, 400, 'session_id is required');
@@ -329,7 +575,7 @@ app.post(
  */
 app.post(
   '/whatsapp/test',
-  requireAuth,
+  requireLiveSession,
   sendLimiter,
   handler(async (req, res) => {
     const { phone, body } = req.body || {};
@@ -378,7 +624,7 @@ function cleanTags(input) {
 
 app.get(
   '/customers',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { data, error } = await supabase
       .from('customers')
@@ -392,7 +638,7 @@ app.get(
 
 app.get(
   '/customers/tags',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { data, error } = await supabase
       .from('customers')
@@ -414,7 +660,7 @@ app.get(
 
 app.post(
   '/customers',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { name, phone, tags } = req.body || {};
     if (!name || !String(name).trim()) return jsonError(res, 400, 'Name is required');
@@ -447,7 +693,7 @@ app.post(
 
 app.put(
   '/customers/:id',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { name, phone, tags } = req.body || {};
     if (!name || !String(name).trim()) return jsonError(res, 400, 'Name is required');
@@ -473,7 +719,7 @@ app.put(
 
 app.delete(
   '/customers/:id',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const owned = await ownsRow('customers', req.params.id, req.user.id);
     if (!owned) return jsonError(res, 404, 'Customer not found');
@@ -490,7 +736,7 @@ app.delete(
 
 /* -------------------------- message templates ------------------------ */
 
-app.get('/messages/placeholders', requireAuth, (req, res) => {
+app.get('/messages/placeholders', requireLiveSession, (req, res) => {
   res.json({
     placeholders: PLACEHOLDER_KEYS.map((key) => ({ key, description: PLACEHOLDERS[key] })),
   });
@@ -498,7 +744,7 @@ app.get('/messages/placeholders', requireAuth, (req, res) => {
 
 app.get(
   '/messages',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { data, error } = await supabase
       .from('message_templates')
@@ -526,7 +772,7 @@ function validateTemplate(name, body) {
 
 app.post(
   '/messages',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { name, body } = req.body || {};
     const problem = validateTemplate(name, body);
@@ -544,7 +790,7 @@ app.post(
 
 app.put(
   '/messages/:id',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { name, body } = req.body || {};
     const problem = validateTemplate(name, body);
@@ -564,7 +810,7 @@ app.put(
 
 app.delete(
   '/messages/:id',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const owned = await ownsRow('message_templates', req.params.id, req.user.id);
     if (!owned) return jsonError(res, 404, 'Template not found');
@@ -593,7 +839,7 @@ app.delete(
 
 app.get(
   '/schedules',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { data, error } = await supabase
       .from('scheduled_sends')
@@ -607,7 +853,7 @@ app.get(
 
 app.post(
   '/schedules',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const userId = req.user.id;
     const {
@@ -719,7 +965,7 @@ app.post(
 
 app.post(
   '/schedules/:id/cancel',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { data, error } = await supabase
       .from('scheduled_sends')
@@ -737,7 +983,7 @@ app.post(
 /** Bring a failed or cancelled schedule back to life. */
 app.post(
   '/schedules/:id/resume',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const existing = await ownsRow(
       'scheduled_sends',
@@ -773,7 +1019,7 @@ app.post(
 
 app.delete(
   '/schedules/:id',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const owned = await ownsRow('scheduled_sends', req.params.id, req.user.id);
     if (!owned) return jsonError(res, 404, 'Schedule not found');
@@ -791,7 +1037,7 @@ app.delete(
 /** Preview a template exactly as one customer would receive it. */
 app.post(
   '/schedules/preview',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const { template_id, customer_id } = req.body || {};
     const template = await ownsRow('message_templates', template_id, req.user.id, 'id, body');
@@ -819,7 +1065,7 @@ app.post(
 
 app.get(
   '/logs',
-  requireAuth,
+  requireLiveSession,
   handler(async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 100, 500);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
@@ -869,8 +1115,18 @@ app.use((err, req, res, next) => {
 
 /* -------------------------------- boot ------------------------------- */
 
-const server = app.listen(config.port, async () => {
-  console.log(`Server listening on port ${config.port}`);
+// Bind to 0.0.0.0 explicitly. Left to itself Node listens on the IPv6 wildcard,
+// and a platform router that dials the container over IPv4 then gets nothing --
+// which shows up as the host's own "not found" page even though the process is
+// running perfectly well and the logs look healthy.
+const server = app.listen(config.port, '0.0.0.0', async () => {
+  console.log(`Server listening on 0.0.0.0:${config.port}`);
+  console.log(
+    process.env.PORT
+      ? `PORT was supplied by the platform (${process.env.PORT})`
+      : 'PORT was not set by the platform, so the default was used. If the ' +
+          'public URL returns "not found", the domain is pointing at a different port.'
+  );
   console.log(`WhatsApp sessions stored in ${config.waSessionPath}`);
   console.log(`Timezone ${config.timezone}, default country code +${config.defaultCountryCode}`);
 
